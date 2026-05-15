@@ -1,12 +1,10 @@
 Import-Module ActiveDirectory
 
-$UPNSuffix = "local" ← Nom de domaine de la compagnie
-$LicenseGroupName = "Acces Lic-Microsoft-E5-Full" ← Nom du ou DES groupes à enlever
+$UPNSuffix = "robert.ca"
+$LicenseGroupName = "Acces Lic-Microsoft-E5-Full"
 
 function New-ComplexPassword {
-    param (
-        [int]$Length = 15
-    )
+    param ([int]$Length = 15)
 
     $upper   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     $lower   = "abcdefghijklmnopqrstuvwxyz"
@@ -28,13 +26,68 @@ function New-ComplexPassword {
     return -join ($password | Get-Random -Count $Length)
 }
 
+function Get-AccountTypeConfig {
+    param ([string]$AccountType)
+
+    switch ($AccountType.ToUpper()) {
+        "ADMIN" {
+            return @{
+                ChangePasswordAtLogon = $true
+                PasswordNeverExpires  = $false
+                CannotChangePassword  = $false
+                ExpirationDate        = $null
+            }
+        }
+
+        "MOD" {
+            return @{
+                ChangePasswordAtLogon = $true
+                PasswordNeverExpires  = $false
+                CannotChangePassword  = $false
+                ExpirationDate        = $null
+            }
+        }
+
+        "CONSULTANT" {
+            return @{
+                ChangePasswordAtLogon = $false
+                PasswordNeverExpires  = $false
+                CannotChangePassword  = $false
+                ExpirationDate        = (Get-Date).AddMonths(6)
+            }
+        }
+
+        "EQUIPEMENT RF" {
+            return @{
+                ChangePasswordAtLogon = $false
+                PasswordNeverExpires  = $false
+                CannotChangePassword  = $false
+                ExpirationDate        = $null
+            }
+        }
+
+        default {
+            throw "Type de compte invalide : $AccountType"
+        }
+    }
+}
+
 function Create-CopiedUser {
     param (
         [string]$SourceSam,
         [string]$FirstName,
         [string]$LastName,
-        [string]$TargetSam
+        [string]$TargetSam,
+        [string]$AccountType
     )
+
+    try {
+        $TypeConfig = Get-AccountTypeConfig -AccountType $AccountType
+    }
+    catch {
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        return $null
+    }
 
     $ExistingUser = Get-ADUser -Filter "SamAccountName -eq '$TargetSam'" -ErrorAction SilentlyContinue
 
@@ -43,9 +96,10 @@ function Create-CopiedUser {
         return $null
     }
 
-    $SourceUser = Get-ADUser -Identity $SourceSam -Properties MemberOf, DistinguishedName, Department, Title, Company, Manager, Office, Description
-
-    if (-not $SourceUser) {
+    try {
+        $SourceUser = Get-ADUser -Identity $SourceSam -Properties MemberOf, DistinguishedName, Department, Title, Company, Manager, Office, Description
+    }
+    catch {
         Write-Host "Utilisateur source introuvable : $SourceSam" -ForegroundColor Red
         return $null
     }
@@ -58,6 +112,7 @@ function Create-CopiedUser {
     $SecurePassword = ConvertTo-SecureString $PlainPassword -AsPlainText -Force
 
     Write-Host "`nCréation de $DisplayName dans $SourceOU..." -ForegroundColor Cyan
+    Write-Host "Type de compte : $AccountType" -ForegroundColor Cyan
 
     try {
         New-ADUser `
@@ -70,12 +125,14 @@ function Create-CopiedUser {
             -Path $SourceOU `
             -AccountPassword $SecurePassword `
             -Enabled $true `
-            -ChangePasswordAtLogon $true `
+            -ChangePasswordAtLogon $TypeConfig.ChangePasswordAtLogon `
+            -PasswordNeverExpires $TypeConfig.PasswordNeverExpires `
+            -CannotChangePassword $TypeConfig.CannotChangePassword `
             -Department $SourceUser.Department `
             -Title $SourceUser.Title `
             -Company $SourceUser.Company `
             -Office $SourceUser.Office `
-            -Description "Créé à partir du modèle/source : $SourceSam" `
+            -Description "Créé à partir du modèle/source : $SourceSam | Type : $AccountType" `
             -ErrorAction Stop
 
         Write-Host "User créé : $TargetSam" -ForegroundColor Green
@@ -83,6 +140,20 @@ function Create-CopiedUser {
     catch {
         Write-Host "Erreur création user $TargetSam : $($_.Exception.Message)" -ForegroundColor Red
         return $null
+    }
+
+    if ($TypeConfig.ExpirationDate) {
+        try {
+            Set-ADAccountExpiration -Identity $TargetSam -DateTime $TypeConfig.ExpirationDate -ErrorAction Stop
+            Write-Host "Date d'expiration configurée : $($TypeConfig.ExpirationDate)" -ForegroundColor Yellow
+        }
+        catch {
+            Write-Host "Erreur configuration expiration : $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    else {
+        Clear-ADAccountExpiration -Identity $TargetSam -ErrorAction SilentlyContinue
+        Write-Host "Aucune date d'expiration configurée." -ForegroundColor Green
     }
 
     foreach ($GroupDN in $SourceUser.MemberOf) {
@@ -123,8 +194,6 @@ function Create-CopiedUser {
 
     return [PSCustomObject]@{
         Username = $TargetSam
-        Name     = $DisplayName
-        UPN      = $UPN
         Password = $PlainPassword
     }
 }
@@ -136,6 +205,26 @@ Write-Host "1. Créer 1 utilisateur"
 Write-Host "2. Créer plusieurs utilisateurs"
 
 $Mode = Read-Host "Choisir 1 ou 2"
+
+Write-Host "`n=== Type de compte ===" -ForegroundColor Cyan
+Write-Host "1. ADMIN"
+Write-Host "2. MOD"
+Write-Host "3. CONSULTANT"
+Write-Host "4. EQUIPEMENT RF"
+
+$TypeChoice = Read-Host "Choisir le type"
+
+switch ($TypeChoice) {
+    "1" { $AccountType = "ADMIN" }
+    "2" { $AccountType = "MOD" }
+    "3" { $AccountType = "CONSULTANT" }
+    "4" { $AccountType = "EQUIPEMENT RF" }
+    default {
+        Write-Host "Choix invalide. Relancer le script." -ForegroundColor Red
+        exit
+    }
+}
+
 $SourceSam = Read-Host "Entrer le USERNAME du user SOURCE à copier"
 
 if ($Mode -eq "1") {
@@ -147,7 +236,8 @@ if ($Mode -eq "1") {
         -SourceSam $SourceSam `
         -FirstName $FirstName `
         -LastName $LastName `
-        -TargetSam $TargetSam
+        -TargetSam $TargetSam `
+        -AccountType $AccountType
 
     if ($Result) {
         $CreatedUsers += $Result
@@ -167,7 +257,8 @@ elseif ($Mode -eq "2") {
             -SourceSam $SourceSam `
             -FirstName $FirstName `
             -LastName $LastName `
-            -TargetSam $TargetSam
+            -TargetSam $TargetSam `
+            -AccountType $AccountType
 
         if ($Result) {
             $CreatedUsers += $Result
@@ -181,7 +272,7 @@ else {
 Write-Host "`n=== Résumé des comptes créés ===" -ForegroundColor Cyan
 
 if ($CreatedUsers.Count -gt 0) {
-    $CreatedUsers | Format-Table Username, Name, UPN, Password -AutoSize
+    $CreatedUsers | Format-Table Username, Password -AutoSize
 }
 else {
     Write-Host "Aucun compte créé." -ForegroundColor Yellow
