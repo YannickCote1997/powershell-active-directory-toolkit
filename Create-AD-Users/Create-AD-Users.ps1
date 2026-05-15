@@ -1,7 +1,7 @@
 Import-Module ActiveDirectory
 
-$UPNSuffix = "robert.ca"
-$LicenseGroupName = "Acces Lic-Microsoft-E5-Full"
+$UPNSuffix = "local" ← your domain
+$LicenseGroupName = "" ← Your group access
 
 function New-ComplexPassword {
     param ([int]$Length = 15)
